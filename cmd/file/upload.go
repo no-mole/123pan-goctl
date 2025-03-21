@@ -24,7 +24,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -163,7 +162,7 @@ func uploadFile(parent int64, filepath string, target string) error {
 
 	uploadInitReq := &UploadInitReq{
 		ParentFileID: parent,
-		Filename:     fmt.Sprintf("%s/%s", strings.TrimLeft(target, "/"), stat.Name()),
+		Filename:     path.Join(target, filepath),
 		Etag:         etag,
 		Size:         stat.Size(),
 		Duplicate:    2,

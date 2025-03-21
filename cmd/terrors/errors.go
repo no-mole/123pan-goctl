@@ -18,6 +18,8 @@ var (
 	GetAccessTokenError ErrFormat = "fail to gen access token"
 
 	GenFileMD5Error ErrFormat = "fail to gen file MD5 SUM"
+
+	CanNotFormatConfigFIle ErrFormat = "can not format config file"
 )
 
 func New(format ErrFormat, err error, args ...any) error {
