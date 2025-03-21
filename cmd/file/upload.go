@@ -155,19 +155,15 @@ func uploadFile(parent int64, filepath string, target string) error {
 		return terrors.New(terrors.GetAccessTokenError, err)
 	}
 
-	var containDir bool
-	if filepath != stat.Name() && path.Dir(filepath) != "" {
-		containDir = true
-	}
-
 	uploadInitReq := &UploadInitReq{
 		ParentFileID: parent,
 		Filename:     path.Join(target, filepath),
 		Etag:         etag,
 		Size:         stat.Size(),
 		Duplicate:    2,
-		ContainDir:   containDir,
+		ContainDir:   true,
 	}
+
 	utils.Logger.Info("file upload init", zap.Any("info", uploadInitReq))
 	body, err := utils.DoRequest(utils.CreateFileApi, uploadInitReq, tkn)
 	if err != nil {
