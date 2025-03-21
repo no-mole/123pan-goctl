@@ -126,7 +126,11 @@ type GetUploadUrlResp struct {
 	PresignedURL string `json:"presignedURL"`
 }
 
-type CompleteResponse struct {
+type CompleteReq struct {
+	PreuploadID string `json:"preuploadID"`
+}
+
+type CompleteResp struct {
 	Async     bool `json:"async"`
 	Completed bool `json:"completed"`
 	FileID    int  `json:"fileID"`
@@ -165,7 +169,7 @@ func uploadFile(parent int64, filepath string, target string) error {
 	}
 
 	utils.Logger.Info("file upload init", zap.Any("info", uploadInitReq))
-	body, err := utils.DoRequest(utils.CreateFileApi, uploadInitReq, tkn)
+	body, err := utils.DoRequest(http.MethodPost, utils.CreateFileApi, nil, uploadInitReq, tkn, nil)
 	if err != nil {
 		return terrors.New(terrors.FileUploadTaskError, err)
 	}
@@ -202,7 +206,7 @@ func uploadFile(parent int64, filepath string, target string) error {
 			PreuploadID: uploadInitResp.PreuploadID,
 			SliceNo:     sliceNo,
 		}
-		body, err := utils.DoRequest(utils.GetUploadFileUrlApi, urlReq, tkn)
+		body, err := utils.DoRequest(http.MethodPost, utils.GetUploadFileUrlApi, nil, urlReq, tkn, nil)
 		if err != nil {
 			return terrors.New(terrors.FileGetUploadUrlError, err)
 		}
@@ -220,14 +224,12 @@ func uploadFile(parent int64, filepath string, target string) error {
 
 	utils.Logger.Info("all slices uploaded,try to complete file upload")
 
-	body, err = utils.DoRequest(utils.UploadFileCompleteApi, map[string]interface{}{
-		"preuploadID": uploadInitResp.PreuploadID,
-	}, tkn)
+	body, err = utils.DoRequest(http.MethodPost, utils.UploadFileCompleteApi, nil, &CompleteReq{PreuploadID: uploadInitResp.PreuploadID}, tkn, nil)
 	if err != nil {
 		utils.Logger.Error("fail to complete upload file", zap.Error(err))
 		return err
 	}
-	var completedResp *CompleteResponse
+	var completedResp *CompleteResp
 	err = json.Unmarshal(body, &completedResp)
 	if err != nil {
 		utils.Logger.Error("fail to get upload file complete status", zap.String("filepath", filepath), zap.Error(err))
@@ -255,9 +257,7 @@ func uploadFile(parent int64, filepath string, target string) error {
 	defer ticker.Stop()
 	for i := 0; i < 60; i++ {
 		<-ticker.C
-		body, err := utils.DoRequest(utils.UploadFileSyncResultApi, map[string]interface{}{
-			"preuploadID": uploadInitResp.PreuploadID,
-		}, tkn)
+		body, err := utils.DoRequest(http.MethodPost, utils.UploadFileSyncResultApi, nil, &CompleteReq{PreuploadID: uploadInitResp.PreuploadID}, tkn, nil)
 		if err != nil {
 			utils.Logger.Warn("fail to fetch upload result,retrying")
 			continue

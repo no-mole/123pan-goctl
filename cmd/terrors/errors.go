@@ -20,6 +20,8 @@ var (
 	GenFileMD5Error ErrFormat = "fail to gen file MD5 SUM"
 
 	CanNotFormatConfigFIle ErrFormat = "can not format config file"
+
+	MustSpecifyFolderError ErrFormat = "Must specify folder"
 )
 
 func New(format ErrFormat, err error, args ...any) error {

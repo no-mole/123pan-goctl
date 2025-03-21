@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/no-mole/123pan-goctl/cmd/utils"
+	"net/http"
 	"sync"
 )
 
@@ -24,10 +25,9 @@ func GetAccessToken() (string, error) {
 	if token != "" {
 		return token, nil
 	}
-	//todo 缓存token
-	data, err := utils.DoRequest(utils.AccessTokenApi, &TokenRequest{
+	data, err := utils.DoRequest(http.MethodPost, utils.AccessTokenApi, nil, &TokenRequest{
 		ClientID:     utils.ClientId,
-		ClientSecret: utils.ClientSecret}, "")
+		ClientSecret: utils.ClientSecret}, "", nil)
 	if err != nil {
 		return "", err
 	}
