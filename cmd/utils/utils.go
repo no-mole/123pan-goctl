@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	queryBuilder "github.com/google/go-querystring/query"
 	"go.uber.org/zap"
@@ -38,21 +39,62 @@ type APIResponse struct {
 	XtraceID string          `json:"x-traceID"`
 }
 
-func DoRequest(method string, api string, query, data any, token string, headers http.Header) ([]byte, error) {
-	client := http.DefaultClient
+func Request() *requestBuilder {
+	return &requestBuilder{}
+}
 
-	if query != nil {
-		q, err := queryBuilder.Values(query)
+type requestBuilder struct {
+	method      string
+	url         string
+	query, body any
+	token       string
+	headers     http.Header
+}
+
+func (r *requestBuilder) Method(method string) *requestBuilder {
+	r.method = method
+	return r
+}
+
+func (r *requestBuilder) Url(url string) *requestBuilder {
+	r.url = url
+	return r
+}
+func (r *requestBuilder) Query(query any) *requestBuilder {
+	r.query = query
+	return r
+}
+func (r *requestBuilder) Body(body any) *requestBuilder {
+	r.body = body
+	return r
+}
+func (r *requestBuilder) Token(token string) *requestBuilder {
+	r.token = token
+	return r
+}
+func (r *requestBuilder) Headers(headers http.Header) *requestBuilder {
+	r.headers = headers
+	return r
+}
+
+func (r *requestBuilder) Do() ([]byte, error) {
+	if r.method == "" || r.url == "" {
+		return nil, errors.New("request must set method and url")
+	}
+
+	client := http.DefaultClient
+	if r.query != nil {
+		q, err := queryBuilder.Values(r.query)
 		if err != nil {
 			return nil, err
 		}
-		api += "?" + q.Encode()
+		r.url += "?" + q.Encode()
 	}
 
 	var buf *bytes.Buffer
 
-	if data != nil {
-		jsonData, err := json.Marshal(data)
+	if r.body != nil {
+		jsonData, err := json.Marshal(r.body)
 		if err != nil {
 			return nil, err
 		}
@@ -62,18 +104,18 @@ func DoRequest(method string, api string, query, data any, token string, headers
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, method, api, buf)
+	req, err := http.NewRequestWithContext(ctx, r.method, r.url, buf)
 	if err != nil {
 		return nil, err
 	}
 
-	if headers != nil {
-		req.Header = headers
+	if r.headers != nil {
+		req.Header = r.headers
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Platform", "open_platform")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
 	}
 
 	resp, err := client.Do(req)

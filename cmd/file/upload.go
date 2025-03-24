@@ -25,10 +25,17 @@ import (
 	"path"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var workers uint8
+var (
+	workers       uint8
+	maxRetryTimes uint8
+	errLocker     = &sync.Mutex{}
+	errorUploads  []string
+	totalFiles    int64
+)
 
 var wg = &sync.WaitGroup{}
 var ch = make(chan string, 256)
@@ -39,6 +46,9 @@ var fileUploadCmd = &cobra.Command{
 	Short: "file upload file... target",
 	Long:  ``,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if maxRetryTimes < 1 || workers < 1 {
+			return errors.New("args error")
+		}
 		if len(args) < 2 {
 			return errors.New("args not enough")
 		}
@@ -47,13 +57,23 @@ var fileUploadCmd = &cobra.Command{
 
 		for i := 0; i < int(workers); i++ {
 			go func() {
-				for path := range ch {
-					utils.Logger.Info("file upload", zap.String("filepath", path), zap.String("target", target))
-					err := uploadFile(0, path, target)
-					if err != nil {
-						utils.Logger.Error("upload file error", zap.Error(err))
+				for uploadFilepath := range ch {
+					atomic.AddInt64(&totalFiles, 1)
+					var err error
+					for i := 0; i < int(maxRetryTimes); i++ {
+						err = uploadFile(0, uploadFilepath, target)
+						if err != nil {
+							utils.Logger.Error("upload file error,retrying", zap.String("filepath", uploadFilepath), zap.Error(err))
+							continue
+						}
+						break
 					}
 					wg.Done()
+					if err != nil {
+						errLocker.Lock()
+						errorUploads = append(errorUploads, uploadFilepath)
+						errLocker.Unlock()
+					}
 				}
 			}()
 		}
@@ -84,14 +104,21 @@ var fileUploadCmd = &cobra.Command{
 			}
 		}
 		wg.Wait()
+		utils.Logger.Info("all files uploaded",
+			zap.Int64("totalFiles", totalFiles),
+			zap.Int("totalFailed", len(errorUploads)),
+		)
+		if len(errorUploads) > 0 {
+			utils.Logger.Warn("upload failed file list", zap.Strings("failedFiles", errorUploads))
+		}
 		return nil
 	},
 }
 
 func init() {
 	FileCommand.AddCommand(fileUploadCmd)
-
-	fileUploadCmd.Flags().Uint8VarP(&workers, "workers", "w", 1, "concurrent upload thread number")
+	fileUploadCmd.Flags().Uint8VarP(&workers, "workers", "w", 2, "concurrent upload thread number,default 2")
+	fileUploadCmd.Flags().Uint8VarP(&maxRetryTimes, "maxRetryTimes", "r", 3, "file upload max retry times,default 3")
 }
 
 type UploadInitReq struct {
@@ -137,6 +164,14 @@ type CompleteResp struct {
 }
 
 func uploadFile(parent int64, filepath string, target string) error {
+	targetFile := path.Join(target, filepath)
+	logger := utils.Logger.Sugar()
+	logger = logger.With(
+		zap.String("filepath", filepath),
+		zap.String("target", target),
+		zap.String("targetFilepath", targetFile),
+	)
+	logger.Info("start upload")
 	file, err := os.Open(filepath)
 	if err != nil {
 		return terrors.New(terrors.FileOpenError, err)
@@ -161,30 +196,36 @@ func uploadFile(parent int64, filepath string, target string) error {
 
 	uploadInitReq := &UploadInitReq{
 		ParentFileID: parent,
-		Filename:     path.Join(target, filepath),
+		Filename:     targetFile,
 		Etag:         etag,
 		Size:         stat.Size(),
 		Duplicate:    2,
 		ContainDir:   true,
 	}
 
-	utils.Logger.Info("file upload init", zap.Any("info", uploadInitReq))
-	body, err := utils.DoRequest(http.MethodPost, utils.CreateFileApi, nil, uploadInitReq, tkn, nil)
+	logger.Infow("file upload init", "info", uploadInitReq)
+	body, err := utils.Request().Method(http.MethodPost).Url(utils.CreateFileApi).Body(uploadInitReq).Token(tkn).Do()
 	if err != nil {
 		return terrors.New(terrors.FileUploadTaskError, err)
 	}
 	var uploadInitResp *UploadInitResp
 	err = json.Unmarshal(body, &uploadInitResp)
 	if err != nil {
-		utils.Logger.Error("unmarshal resp body err", zap.ByteString("body", body))
+		logger.Error("unmarshal resp body err", zap.ByteString("body", body))
 		return terrors.New(terrors.FileUploadTaskError, err)
 	}
 	if uploadInitResp.Reuse {
-		utils.Logger.Info("reuse upload success", zap.Int64("fileID", uploadInitResp.FileID))
+		logger.Infow("reuse upload success", "fileID", uploadInitResp.FileID)
 		return nil
 	}
 
-	utils.Logger.Info("start upload", zap.Int64("totalSlices", int64(math.Ceil(float64(stat.Size()/uploadInitResp.SliceSize)))), zap.String("totalSize", humanize.Bytes(uint64(stat.Size()))), zap.String("sliceSize", humanize.Bytes(uint64(uploadInitResp.SliceSize))))
+	totalSlices := int64(math.Ceil(float64(stat.Size() / uploadInitResp.SliceSize)))
+	logger = logger.With(
+		zap.String("totalSize", humanize.Bytes(uint64(stat.Size()))),
+		zap.String("sliceSize", humanize.Bytes(uint64(uploadInitResp.SliceSize))),
+		zap.Int64("totalSlices", totalSlices),
+	)
+	logger.Info("start upload")
 
 	//前边计算hash已经read all，重置偏移
 	_, err = file.Seek(0, 0)
@@ -201,19 +242,19 @@ func uploadFile(parent int64, filepath string, target string) error {
 			break
 		}
 		sliceNo++
-		utils.Logger.Info("upload file slice", zap.Any("sliceNo", sliceNo))
-		urlReq := GetUploadUrlReq{
+		logger.Infow("upload file slice", "curSliceNo", sliceNo)
+		getUploadUrlReq := GetUploadUrlReq{
 			PreuploadID: uploadInitResp.PreuploadID,
 			SliceNo:     sliceNo,
 		}
-		body, err := utils.DoRequest(http.MethodPost, utils.GetUploadFileUrlApi, nil, urlReq, tkn, nil)
+		body, err := utils.Request().Method(http.MethodPost).Url(utils.GetUploadFileUrlApi).Body(getUploadUrlReq).Token(tkn).Do()
 		if err != nil {
 			return terrors.New(terrors.FileGetUploadUrlError, err)
 		}
 		var uploadURL GetUploadUrlResp
 		err = json.Unmarshal(body, &uploadURL)
 		if err != nil {
-			utils.Logger.Error("unmarshal body err", zap.ByteString("body", body))
+			logger.Error("unmarshal body err", zap.ByteString("body", body))
 			return err
 		}
 		err = putPart(uploadURL.PresignedURL, bytes.NewReader(buffer[:n]), int64(n))
@@ -222,44 +263,42 @@ func uploadFile(parent int64, filepath string, target string) error {
 		}
 	}
 
-	utils.Logger.Info("all slices uploaded,try to complete file upload")
+	logger.Info("all slices uploaded,try to complete file upload")
 
-	body, err = utils.DoRequest(http.MethodPost, utils.UploadFileCompleteApi, nil, &CompleteReq{PreuploadID: uploadInitResp.PreuploadID}, tkn, nil)
+	body, err = utils.Request().Method(http.MethodPost).Url(utils.UploadFileCompleteApi).Body(&CompleteReq{PreuploadID: uploadInitResp.PreuploadID}).Token(tkn).Do()
 	if err != nil {
-		utils.Logger.Error("fail to complete upload file", zap.Error(err))
+		logger.Error("fail to complete upload file", zap.Error(err))
 		return err
 	}
 	var completedResp *CompleteResp
 	err = json.Unmarshal(body, &completedResp)
 	if err != nil {
-		utils.Logger.Error("fail to get upload file complete status", zap.String("filepath", filepath), zap.Error(err))
+		logger.Error("fail to get upload file complete status", zap.Error(err))
 		return err
 	}
 	if completedResp == nil {
 		err = errors.New("fail to complete upload file")
-		utils.Logger.Error("fail to complete upload file", zap.ByteString("resp", body))
+		logger.Error("fail to complete upload file", zap.ByteString("resp", body))
 		return err
 	}
 
 	if !completedResp.Async && (completedResp.FileID == 0 || completedResp.Completed == false) {
 		err = errors.New("fail to complete file")
-		utils.Logger.Error(err.Error())
+		logger.Error(err.Error())
 		return err
 	}
 	if completedResp.Completed || !completedResp.Async {
-		utils.Logger.Info("file upload complete", zap.Int("fileID", completedResp.FileID))
+		logger.Infow("file upload complete", "fileID", completedResp.FileID)
 		return nil
 	}
 
-	utils.Logger.Info("file upload completed,waiting for file ready")
+	logger.Info("file upload completed,waiting for file ready")
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for i := 0; i < 60; i++ {
-		<-ticker.C
-		body, err := utils.DoRequest(http.MethodPost, utils.UploadFileSyncResultApi, nil, &CompleteReq{PreuploadID: uploadInitResp.PreuploadID}, tkn, nil)
+	for i := 0; i < 100; i++ {
+		time.Sleep(3 * time.Second)
+		body, err = utils.Request().Method(http.MethodPost).Url(utils.UploadFileSyncResultApi).Body(&CompleteReq{PreuploadID: uploadInitResp.PreuploadID}).Token(tkn).Do()
 		if err != nil {
-			utils.Logger.Warn("fail to fetch upload result,retrying")
+			logger.Warn("fail to fetch upload result,retrying")
 			continue
 		}
 		var resp struct {
@@ -268,17 +307,17 @@ func uploadFile(parent int64, filepath string, target string) error {
 		}
 		err = json.Unmarshal(body, &resp)
 		if err != nil {
-			utils.Logger.Warn("fail to fetch upload result,retrying", zap.ByteString("raw", body))
+			logger.Warn("fail to fetch upload result,retrying", zap.ByteString("raw", body))
 			continue
 		}
 		if resp.Completed {
-			utils.Logger.Info("file upload success", zap.Int("fileID", resp.FileID))
+			logger.Infow("file upload success", "fileID", resp.FileID)
 			return nil
 		}
-		utils.Logger.Info("file not ready")
+		logger.Info("file not ready")
 	}
-	utils.Logger.Warn("fetch upload result timeout")
-	return nil
+	err = terrors.New(terrors.FetchFileUploadSatusError, nil)
+	return err
 }
 
 func putPart(url string, reader io.Reader, size int64) error {

@@ -25,9 +25,9 @@ func GetAccessToken() (string, error) {
 	if token != "" {
 		return token, nil
 	}
-	data, err := utils.DoRequest(http.MethodPost, utils.AccessTokenApi, nil, &TokenRequest{
+	data, err := utils.Request().Method(http.MethodPost).Url(utils.AccessTokenApi).Body(&TokenRequest{
 		ClientID:     utils.ClientId,
-		ClientSecret: utils.ClientSecret}, "", nil)
+		ClientSecret: utils.ClientSecret}).Do()
 	if err != nil {
 		return "", err
 	}
